@@ -2,3 +2,9 @@ fastapi
 uvicorn
 python-multipart
 aiofiles
+pypdf
+langchain-text-splitters
+sentence-transformers
+faiss-cpu
+numpy
+requests

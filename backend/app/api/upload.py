@@ -1,33 +1,24 @@
-from fastapi import APIRouter, UploadFile, File
+import uuid
 import aiofiles
 from pathlib import Path
-import uuid
 
-from pypdf import PdfReader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from fastapi import APIRouter, UploadFile, File
 
-from sentence_transformers import SentenceTransformer
-import faiss
-import numpy as np
+from app.parsers import pdf_parser
+from app.retrieval import faiss_retriever
+from app.models.schemas import UploadResponse
 
 router = APIRouter()
 
-# Load embedding model once
-model = SentenceTransformer("all-MiniLM-L6-v2")
 
-
-@router.post("/upload")
+@router.post("/upload", response_model=UploadResponse)
 async def upload_file(file: UploadFile = File(...)):
 
-    # -----------------------------
     # 1. Validate file type
-    # -----------------------------
     if not file.filename.lower().endswith(".pdf"):
         return {"error": "Only PDF files are supported"}
 
-    # -----------------------------
     # 2. Save file
-    # -----------------------------
     upload_dir = Path("uploads")
     upload_dir.mkdir(exist_ok=True)
 
@@ -38,96 +29,28 @@ async def upload_file(file: UploadFile = File(...)):
         content = await file.read()
         await out_file.write(content)
 
-    # -----------------------------
-    # 3. Read PDF
-    # -----------------------------
-    reader = PdfReader(str(file_path))
+    # 3. Parse and chunk
+    chunks = pdf_parser.extract_chunks(file_path, file.filename)
 
-    # -----------------------------
-    # 4. Create text splitter
-    # -----------------------------
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=300,
-        chunk_overlap=30
-    )
-
-    # This will contain:
-    # text + filename + page number
-    chunks_with_metadata = []
-
-    # -----------------------------
-    # 5. Extract and chunk page-wise
-    # -----------------------------
-    for page_number, page in enumerate(reader.pages, start=1):
-
-        text = page.extract_text()
-
-        if not text or not text.strip():
-            continue
-
-        page_chunks = text_splitter.split_text(text)
-
-        for chunk in page_chunks:
-            chunks_with_metadata.append({
-                "text": chunk,
-                "filename": file.filename,
-                "page": page_number
-            })
-
-    # -----------------------------
-    # 6. Check extracted content
-    # -----------------------------
-    if not chunks_with_metadata:
+    if not chunks:
         return {"error": "No readable text found in PDF"}
 
-    # -----------------------------
-    # 7. Get only text for embeddings
-    # -----------------------------
-    chunk_texts = [
-        chunk["text"]
-        for chunk in chunks_with_metadata
-    ]
+    # 4. Build FAISS index and store
+    index = faiss_retriever.build_index(chunks)
 
-    # -----------------------------
-    # 8. Create embeddings
-    # -----------------------------
-    embeddings = model.encode(chunk_texts)
+    faiss_retriever.stored_chunks.clear()
+    faiss_retriever.stored_chunks.extend(chunks)
 
-    embeddings = np.array(
-        embeddings
-    ).astype("float32")
+    faiss_retriever.stored_index.clear()
+    faiss_retriever.stored_index.append(index)
 
-    # -----------------------------
-    # 9. Create FAISS index
-    # -----------------------------
-    dimension = embeddings.shape[1]
+    total_pages = pdf_parser.page_count(file_path)
 
-    index = faiss.IndexFlatL2(dimension)
+    print(f"✅ Processed {len(chunks)} chunks from {file.filename}")
 
-    index.add(embeddings)
-
-    # -----------------------------
-    # 10. Store for query endpoint
-    # -----------------------------
-    from app.api.query import stored_chunks, stored_index
-
-    stored_chunks.clear()
-    stored_chunks.extend(chunks_with_metadata)
-
-    stored_index.clear()
-    stored_index.append(index)
-
-    print(
-        f"✅ Processed {len(chunks_with_metadata)} chunks "
-        f"from {file.filename}"
+    return UploadResponse(
+        filename=file.filename,
+        pages_processed=total_pages,
+        chunks_created=len(chunks),
+        message="File processed successfully 🚀",
     )
-
-    # -----------------------------
-    # 11. Response
-    # -----------------------------
-    return {
-        "filename": file.filename,
-        "pages_processed": len(reader.pages),
-        "chunks_created": len(chunks_with_metadata),
-        "message": "File processed successfully 🚀"
-    }
