@@ -1,30 +1,25 @@
+from typing import Optional
 from app.agents.base_agent import BaseAgent
 from app.retrieval import faiss_retriever
 from app.services.qa_service import ask_llm
 
-# Max chars of context to send to the LLM (~6000 chars ≈ safe for Llama3 8K window)
 MAX_CONTEXT_CHARS = 6000
 
 
-def _build_context(max_chars: int = MAX_CONTEXT_CHARS) -> str:
+def _build_context(doc_id: Optional[str] = None, max_chars: int = MAX_CONTEXT_CHARS) -> str:
     """
-    Sample chunks evenly from the entire document up to max_chars.
-    Even sampling ensures coverage across all pages rather than
-    only the first N chunks.
+    Sample chunks evenly from the selected document (or all documents) up to max_chars.
     """
-    chunks = faiss_retriever.stored_chunks
+    chunks = faiss_retriever.get_chunks(doc_id=doc_id)
     if not chunks:
         return ""
 
     total = len(chunks)
+    step = max(1, total // 100)
+    indices = list(range(0, total, step))
 
-    # Figure out how many chunks we can include before hitting the char limit
     collected = []
     char_count = 0
-
-    # Walk evenly spaced indices
-    step = max(1, total // 100)  # at most ~100 sample points
-    indices = list(range(0, total, step))
 
     for idx in indices:
         text = chunks[idx]["text"]
@@ -38,18 +33,21 @@ def _build_context(max_chars: int = MAX_CONTEXT_CHARS) -> str:
 
 class SummaryAgent(BaseAgent):
     """
-    Summarizes the entire uploaded document using all available chunks.
+    Summarizes the uploaded study material using all available chunks.
     """
 
-    def run(self, **kwargs) -> dict:
+    def run(self, doc_id: Optional[str] = None, **kwargs) -> dict:
         """
         Returns:
             {summary: str}
         """
-        if not faiss_retriever.stored_index:
+        if not faiss_retriever.has_documents():
             return {"summary": "No document uploaded."}
 
-        context = _build_context()
+        context = _build_context(doc_id=doc_id)
+
+        if not context:
+            return {"summary": "No readable content found for the selected document."}
 
         prompt = f"""
 You are an Academic Copilot. A student has uploaded their study material and wants a clear, structured summary.

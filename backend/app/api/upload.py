@@ -22,7 +22,8 @@ async def upload_file(file: UploadFile = File(...)):
     upload_dir = Path("uploads")
     upload_dir.mkdir(exist_ok=True)
 
-    unique_filename = f"{uuid.uuid4()}_{file.filename}"
+    doc_id = str(uuid.uuid4())
+    unique_filename = f"{doc_id}_{file.filename}"
     file_path = upload_dir / unique_filename
 
     async with aiofiles.open(file_path, "wb") as out_file:
@@ -35,22 +36,22 @@ async def upload_file(file: UploadFile = File(...)):
     if not chunks:
         return {"error": "No readable text found in PDF"}
 
-    # 4. Build FAISS index and store
-    index = faiss_retriever.build_index(chunks)
-
-    faiss_retriever.stored_chunks.clear()
-    faiss_retriever.stored_chunks.extend(chunks)
-
-    faiss_retriever.stored_index.clear()
-    faiss_retriever.stored_index.append(index)
-
     total_pages = pdf_parser.page_count(file_path)
 
-    print(f"✅ Processed {len(chunks)} chunks from {file.filename}")
+    # 4. Build cosine FAISS index and register (persists automatically)
+    faiss_retriever.build_and_register_index(
+        doc_id=doc_id,
+        filename=file.filename,
+        pages=total_pages,
+        chunks=chunks,
+    )
+
+    print(f"✅ Processed and persisted {len(chunks)} chunks for {file.filename} (doc_id={doc_id})")
 
     return UploadResponse(
+        doc_id=doc_id,
         filename=file.filename,
         pages_processed=total_pages,
         chunks_created=len(chunks),
-        message="File processed successfully 🚀",
+        message="File processed and indexed successfully 🚀",
     )

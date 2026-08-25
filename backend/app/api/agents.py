@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from app.models.schemas import (
+    SummaryRequest,
     SummaryResponse,
     QuizRequest,
     QuizResponse,
@@ -21,16 +22,16 @@ _flashcard_agent = FlashcardAgent()
 
 
 @router.post("/summarize", response_model=SummaryResponse)
-def summarize():
-    """Generate a structured summary of the uploaded document."""
-    result = _summary_agent.run()
+def summarize(request: SummaryRequest = SummaryRequest()):
+    """Generate a structured summary of the uploaded document(s)."""
+    result = _summary_agent.run(doc_id=request.doc_id)
     return SummaryResponse(summary=result["summary"])
 
 
 @router.post("/quiz", response_model=QuizResponse)
 def generate_quiz(request: QuizRequest):
-    """Generate open-ended conceptual quiz questions from the uploaded document."""
-    result = _quiz_agent.run(num_questions=request.num_questions)
+    """Generate open-ended conceptual quiz questions from the uploaded document(s)."""
+    result = _quiz_agent.run(num_questions=request.num_questions, doc_id=request.doc_id)
 
     questions = [
         QuizQuestion(
@@ -46,8 +47,8 @@ def generate_quiz(request: QuizRequest):
 
 @router.post("/flashcards", response_model=FlashcardResponse)
 def generate_flashcards(request: FlashcardRequest):
-    """Generate term/definition flashcard pairs from the uploaded document."""
-    result = _flashcard_agent.run(num_cards=request.num_cards)
+    """Generate term/definition flashcard pairs from the uploaded document(s)."""
+    result = _flashcard_agent.run(num_cards=request.num_cards, doc_id=request.doc_id)
 
     flashcards = [
         Flashcard(
