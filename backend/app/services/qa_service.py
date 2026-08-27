@@ -1,6 +1,6 @@
+from typing import Optional
 import requests
 from app.retrieval import faiss_retriever
-
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "llama3"
@@ -18,18 +18,18 @@ def ask_llm(prompt: str) -> str:
     return response.json()["response"]
 
 
-def get_answer(question: str) -> dict:
+def get_answer(question: str, doc_id: Optional[str] = None) -> dict:
     """
     Full RAG pipeline:
-      1. Retrieve relevant chunks via FAISS
+      1. Retrieve relevant chunks via FAISS (filtered by doc_id if provided)
       2. Build a study-assistant prompt
       3. Call Llama
       4. Return answer + source references
     """
-    if not faiss_retriever.stored_index:
+    if not faiss_retriever.has_documents():
         return {"answer": "No document uploaded.", "sources": []}
 
-    retrieved_chunks = faiss_retriever.retrieve(question)
+    retrieved_chunks = faiss_retriever.retrieve(question, doc_id=doc_id)
 
     if not retrieved_chunks:
         return {"answer": "Not found.", "sources": []}
@@ -70,10 +70,14 @@ Answer:
     if answer.lower().startswith("not found"):
         return {"answer": "Not found.", "sources": []}
 
-    # Deduplicate page citations
+    # Deduplicate citations
     sources = []
     for chunk in retrieved_chunks:
-        source = {"filename": chunk["filename"], "page": chunk["page"]}
+        source = {
+            "filename": chunk["filename"],
+            "page": chunk["page"],
+            "doc_id": chunk.get("doc_id"),
+        }
         if source not in sources:
             sources.append(source)
 

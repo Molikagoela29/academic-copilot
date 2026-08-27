@@ -15,8 +15,9 @@ function App() {
   const fileInputRef = useRef(null);
   const messagesEndRef = useRef(null);
 
-  // ── Upload state
-  const [uploadedFile, setUploadedFile] = useState(null);
+  // ── Documents registry state
+  const [documents, setDocuments] = useState([]);
+  const [selectedDocId, setSelectedDocId] = useState("all"); // "all" or specific doc_id
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
 
@@ -47,6 +48,28 @@ function App() {
   const [isGeneratingCards, setIsGeneratingCards] = useState(false);
   const [flashcardError, setFlashcardError] = useState("");
   const [flippedCards, setFlippedCards] = useState({});
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Fetch existing documents on load
+  // ─────────────────────────────────────────────────────────────────────────
+  const fetchDocuments = async () => {
+    try {
+      const res = await fetch(`${API}/documents`);
+      if (res.ok) {
+        const data = await res.json();
+        setDocuments(data.documents || []);
+      }
+    } catch (err) {
+      console.error("Failed to load documents:", err);
+    }
+  };
+
+  useEffect(() => {
+    fetchDocuments();
+  }, []);
+
+  const hasDocuments = documents.length > 0;
+  const activeDocument = documents.find((d) => d.doc_id === selectedDocId);
 
   // ─────────────────────────────────────────────────────────────────────────
   // Upload PDF
@@ -80,21 +103,8 @@ function App() {
       const data = await response.json();
       if (!response.ok || data.error) throw new Error(data.error || "Failed to upload PDF.");
 
-      setUploadedFile({
-        name: data.filename,
-        pages: data.pages_processed,
-        chunks: data.chunks_created,
-      });
-
-      // Reset all tool outputs when a new PDF is loaded
-      setMessages([]);
-      setQuestion("");
-      setSummary("");
-      setQuizQuestions([]);
-      setFlashcards([]);
-      setRevealedAnswers({});
-      setFlippedCards({});
-      setActiveTab(TABS.CHAT);
+      await fetchDocuments();
+      setSelectedDocId(data.doc_id); // Automatically focus the newly uploaded PDF
     } catch (error) {
       setUploadError(error.message);
     } finally {
@@ -104,12 +114,34 @@ function App() {
   };
 
   // ─────────────────────────────────────────────────────────────────────────
+  // Delete document
+  // ─────────────────────────────────────────────────────────────────────────
+  const handleDeleteDoc = async (e, docId) => {
+    e.stopPropagation();
+    if (!window.confirm("Are you sure you want to delete this document from the library?")) {
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API}/documents/${docId}`, { method: "DELETE" });
+      if (res.ok) {
+        if (selectedDocId === docId) {
+          setSelectedDocId("all");
+        }
+        await fetchDocuments();
+      }
+    } catch (err) {
+      console.error("Failed to delete document:", err);
+    }
+  };
+
+  // ─────────────────────────────────────────────────────────────────────────
   // Chat
   // ─────────────────────────────────────────────────────────────────────────
   const handleAskQuestion = async () => {
     const trimmed = question.trim();
     if (!trimmed) return;
-    if (!uploadedFile) { setQueryError("Please upload a PDF first."); return; }
+    if (!hasDocuments) { setQueryError("Please upload a PDF first."); return; }
 
     const userMessage = { id: Date.now(), role: "user", text: trimmed };
     setMessages((prev) => [...prev, userMessage]);
@@ -121,7 +153,10 @@ function App() {
       const response = await fetch(`${API}/query`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: trimmed }),
+        body: JSON.stringify({
+          question: trimmed,
+          doc_id: selectedDocId !== "all" ? selectedDocId : null,
+        }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error("Failed to get an answer.");
@@ -166,13 +201,19 @@ function App() {
   // Summary
   // ─────────────────────────────────────────────────────────────────────────
   const handleSummarize = async () => {
-    if (!uploadedFile) return;
+    if (!hasDocuments) return;
     setIsSummarizing(true);
     setSummaryError("");
     setSummary("");
 
     try {
-      const response = await fetch(`${API}/agents/summarize`, { method: "POST" });
+      const response = await fetch(`${API}/agents/summarize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          doc_id: selectedDocId !== "all" ? selectedDocId : null,
+        }),
+      });
       const data = await response.json();
       if (!response.ok) throw new Error("Failed to generate summary.");
       setSummary(data.summary);
@@ -187,7 +228,7 @@ function App() {
   // Quiz
   // ─────────────────────────────────────────────────────────────────────────
   const handleGenerateQuiz = async () => {
-    if (!uploadedFile) return;
+    if (!hasDocuments) return;
     setIsGeneratingQuiz(true);
     setQuizError("");
     setQuizQuestions([]);
@@ -197,7 +238,10 @@ function App() {
       const response = await fetch(`${API}/agents/quiz`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ num_questions: numQuestions }),
+        body: JSON.stringify({
+          num_questions: numQuestions,
+          doc_id: selectedDocId !== "all" ? selectedDocId : null,
+        }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error("Failed to generate quiz.");
@@ -216,7 +260,7 @@ function App() {
   // Flashcards
   // ─────────────────────────────────────────────────────────────────────────
   const handleGenerateFlashcards = async () => {
-    if (!uploadedFile) return;
+    if (!hasDocuments) return;
     setIsGeneratingCards(true);
     setFlashcardError("");
     setFlashcards([]);
@@ -226,7 +270,10 @@ function App() {
       const response = await fetch(`${API}/agents/flashcards`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ num_cards: numCards }),
+        body: JSON.stringify({
+          num_cards: numCards,
+          doc_id: selectedDocId !== "all" ? selectedDocId : null,
+        }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error("Failed to generate flashcards.");
@@ -242,8 +289,13 @@ function App() {
     setFlippedCards((prev) => ({ ...prev, [index]: !prev[index] }));
 
   // ─────────────────────────────────────────────────────────────────────────
-  // Render
+  // Scope Label
   // ─────────────────────────────────────────────────────────────────────────
+  const scopeLabel =
+    selectedDocId === "all"
+      ? `All Documents (${documents.length})`
+      : activeDocument?.filename || "Selected Document";
+
   return (
     <div className="app">
       {/* ========================= SIDEBAR ========================== */}
@@ -257,8 +309,8 @@ function App() {
         </div>
 
         <div className="upload-card">
-          <h3>Study Material</h3>
-          <p>Upload a PDF to start asking questions.</p>
+          <h3>Upload PDF</h3>
+          <p>Add study material to your library.</p>
 
           <input
             ref={fileInputRef}
@@ -273,58 +325,96 @@ function App() {
             onClick={handleUploadClick}
             disabled={isUploading}
           >
-            {isUploading ? "Processing PDF..." : "+ Upload PDF"}
+            {isUploading ? "Indexing PDF..." : "+ Add PDF Document"}
           </button>
 
           {uploadError && <p className="upload-error">{uploadError}</p>}
         </div>
 
+        {/* ── Document Library ── */}
         <div className="document-section">
-          <p className="section-title">UPLOADED DOCUMENT</p>
-          <div className="document-card">
-            <div className="pdf-icon">PDF</div>
-            <div className="document-info">
-              {uploadedFile ? (
-                <>
-                  <p title={uploadedFile.name}>{uploadedFile.name}</p>
+          <div className="section-title-row">
+            <p className="section-title">DOCUMENT LIBRARY ({documents.length})</p>
+          </div>
+
+          <div className="document-list">
+            {hasDocuments && (
+              <div
+                className={`document-card ${selectedDocId === "all" ? "doc-selected" : ""}`}
+                onClick={() => setSelectedDocId("all")}
+              >
+                <div className="pdf-icon all-icon">📚</div>
+                <div className="document-info">
+                  <p>All Documents</p>
+                  <span>{documents.reduce((acc, d) => acc + d.chunks_count, 0)} total chunks</span>
+                </div>
+              </div>
+            )}
+
+            {documents.map((doc) => (
+              <div
+                key={doc.doc_id}
+                className={`document-card ${selectedDocId === doc.doc_id ? "doc-selected" : ""}`}
+                onClick={() => setSelectedDocId(doc.doc_id)}
+              >
+                <div className="pdf-icon">PDF</div>
+                <div className="document-info">
+                  <p title={doc.filename}>{doc.filename}</p>
                   <span>
-                    {uploadedFile.pages} pages · {uploadedFile.chunks} chunks
+                    {doc.pages} p · {doc.chunks_count} chunks
                   </span>
-                </>
-              ) : (
-                <>
-                  <p>No document uploaded</p>
-                  <span>Your PDF will appear here</span>
-                </>
-              )}
-            </div>
+                </div>
+                <button
+                  className="doc-delete-btn"
+                  title="Delete document"
+                  onClick={(e) => handleDeleteDoc(e, doc.doc_id)}
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+
+            {!hasDocuments && (
+              <div className="empty-docs">
+                <span>No documents indexed yet. Upload a PDF above to get started.</span>
+              </div>
+            )}
           </div>
         </div>
 
         <div className="sidebar-footer">
-          <p>Powered by RAG + Llama</p>
+          <p>Persistent FAISS + Cosine RAG + Llama</p>
         </div>
       </aside>
 
       {/* ========================= MAIN AREA ========================== */}
       <main className="chat-area">
-        {/* ── Tab Bar ── */}
-        <div className="tab-bar">
-          {[
-            { id: TABS.CHAT, label: "💬 Chat" },
-            { id: TABS.SUMMARY, label: "📄 Summary" },
-            { id: TABS.QUIZ, label: "🧠 Quiz" },
-            { id: TABS.FLASHCARDS, label: "🃏 Flashcards" },
-          ].map((tab) => (
-            <button
-              key={tab.id}
-              className={`tab-btn ${activeTab === tab.id ? "tab-active" : ""}`}
-              onClick={() => setActiveTab(tab.id)}
-              disabled={!uploadedFile && tab.id !== TABS.CHAT}
-            >
-              {tab.label}
-            </button>
-          ))}
+        {/* ── Top Bar: Tabs + Scope Indicator ── */}
+        <div className="top-nav-bar">
+          <div className="tab-bar">
+            {[
+              { id: TABS.CHAT, label: "💬 Chat" },
+              { id: TABS.SUMMARY, label: "📄 Summary" },
+              { id: TABS.QUIZ, label: "🧠 Quiz" },
+              { id: TABS.FLASHCARDS, label: "🃏 Flashcards" },
+            ].map((tab) => (
+              <button
+                key={tab.id}
+                className={`tab-btn ${activeTab === tab.id ? "tab-active" : ""}`}
+                onClick={() => setActiveTab(tab.id)}
+                disabled={!hasDocuments && tab.id !== TABS.CHAT}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="scope-pill">
+            <span className="scope-tag">Scope:</span>
+            <span className="scope-name" title={scopeLabel}>
+              {scopeLabel}
+            </span>
+          </div>
         </div>
 
         {/* ========================= CHAT TAB ========================== */}
@@ -333,7 +423,11 @@ function App() {
             <header className="chat-header">
               <div>
                 <h2>AI Study Assistant</h2>
-                <p>Ask questions from your uploaded study material</p>
+                <p>
+                  {hasDocuments
+                    ? `Asking questions against ${scopeLabel}`
+                    : "Upload your study material to begin"}
+                </p>
               </div>
               <div className="header-actions">
                 {messages.length > 0 && (
@@ -358,8 +452,9 @@ function App() {
                   <div className="welcome-icon">✨</div>
                   <h2>What would you like to learn?</h2>
                   <p>
-                    Upload your study material and ask questions, request
-                    explanations, compare concepts, or simplify difficult topics.
+                    {hasDocuments
+                      ? `Currently searching in ${scopeLabel}. Ask questions, compare concepts, or request step-by-step explanations.`
+                      : "Upload study materials on the left and ask questions, generate summaries, quizzes, and flashcards."}
                   </p>
                   <div className="suggestions">
                     <button onClick={() => handleSuggestion("Explain this topic in simple words.")}>
@@ -445,28 +540,30 @@ function App() {
             {queryError && <div className="query-error">{queryError}</div>}
 
             <div className="chat-input-wrapper">
-              <div className={`chat-input ${!uploadedFile ? "disabled-input" : ""}`}>
+              <div className={`chat-input ${!hasDocuments ? "disabled-input" : ""}`}>
                 <input
                   type="text"
                   value={question}
                   onChange={(e) => setQuestion(e.target.value)}
                   onKeyDown={handleKeyDown}
-                  disabled={!uploadedFile || isAsking}
+                  disabled={!hasDocuments || isAsking}
                   placeholder={
-                    uploadedFile
-                      ? "Ask something about your study material..."
+                    hasDocuments
+                      ? `Ask something about ${scopeLabel}...`
                       : "Upload a PDF to start asking questions..."
                   }
                 />
                 <button
                   className="send-btn"
                   onClick={handleAskQuestion}
-                  disabled={!uploadedFile || isAsking || !question.trim()}
+                  disabled={!hasDocuments || isAsking || !question.trim()}
                 >
                   ➜
                 </button>
               </div>
-              <p className="input-note">Answers are based on your uploaded study material.</p>
+              <p className="input-note">
+                Answers are grounded in {scopeLabel} via semantic retrieval.
+              </p>
             </div>
           </>
         )}
@@ -477,12 +574,12 @@ function App() {
             <div className="tool-header">
               <div>
                 <h2>📄 Document Summary</h2>
-                <p>Get a structured overview of your entire study material.</p>
+                <p>Generating summary for: <strong>{scopeLabel}</strong></p>
               </div>
               <button
                 className="tool-action-btn"
                 onClick={handleSummarize}
-                disabled={isSummarizing || !uploadedFile}
+                disabled={isSummarizing || !hasDocuments}
               >
                 {isSummarizing ? "Summarizing..." : summary ? "Regenerate" : "Generate Summary"}
               </button>
@@ -493,7 +590,7 @@ function App() {
             {isSummarizing && (
               <div className="tool-loading">
                 <div className="thinking"><span></span><span></span><span></span></div>
-                <p>Reading through your document…</p>
+                <p>Reading through {scopeLabel}…</p>
               </div>
             )}
 
@@ -506,7 +603,7 @@ function App() {
             {!summary && !isSummarizing && (
               <div className="tool-empty">
                 <div className="tool-empty-icon">📄</div>
-                <p>Click <strong>Generate Summary</strong> to get an AI-written overview of your study material.</p>
+                <p>Click <strong>Generate Summary</strong> to get an AI-written overview of {scopeLabel}.</p>
               </div>
             )}
           </div>
@@ -517,8 +614,8 @@ function App() {
           <div className="tool-panel">
             <div className="tool-header">
               <div>
-                <h2>🧠 Quiz</h2>
-                <p>Test your understanding with open-ended conceptual questions.</p>
+                <h2>🧠 Conceptual Quiz</h2>
+                <p>Generating questions from: <strong>{scopeLabel}</strong></p>
               </div>
               <div className="tool-controls">
                 <label>
@@ -535,7 +632,7 @@ function App() {
                 <button
                   className="tool-action-btn"
                   onClick={handleGenerateQuiz}
-                  disabled={isGeneratingQuiz || !uploadedFile}
+                  disabled={isGeneratingQuiz || !hasDocuments}
                 >
                   {isGeneratingQuiz ? "Generating..." : quizQuestions.length ? "Regenerate" : "Generate Quiz"}
                 </button>
@@ -547,7 +644,7 @@ function App() {
             {isGeneratingQuiz && (
               <div className="tool-loading">
                 <div className="thinking"><span></span><span></span><span></span></div>
-                <p>Crafting questions from your study material…</p>
+                <p>Crafting conceptual questions from {scopeLabel}…</p>
               </div>
             )}
 
@@ -563,7 +660,7 @@ function App() {
                       className={`reveal-btn ${revealedAnswers[index] ? "revealed" : ""}`}
                       onClick={() => toggleAnswer(index)}
                     >
-                      {revealedAnswers[index] ? "Hide Answer ▲" : "Reveal Answer ▼"}
+                      {revealedAnswers[index] ? "Hide Explanation ▲" : "Reveal Explanation ▼"}
                     </button>
                     {revealedAnswers[index] && (
                       <div className="quiz-answer">
@@ -578,7 +675,7 @@ function App() {
             {quizQuestions.length === 0 && !isGeneratingQuiz && (
               <div className="tool-empty">
                 <div className="tool-empty-icon">🧠</div>
-                <p>Click <strong>Generate Quiz</strong> to create conceptual questions from your material.</p>
+                <p>Click <strong>Generate Quiz</strong> to test your conceptual understanding of {scopeLabel}.</p>
               </div>
             )}
           </div>
@@ -590,7 +687,7 @@ function App() {
             <div className="tool-header">
               <div>
                 <h2>🃏 Flashcards</h2>
-                <p>Flip cards to drill key terms and definitions.</p>
+                <p>Generating terms and definitions from: <strong>{scopeLabel}</strong></p>
               </div>
               <div className="tool-controls">
                 <label>
@@ -607,7 +704,7 @@ function App() {
                 <button
                   className="tool-action-btn"
                   onClick={handleGenerateFlashcards}
-                  disabled={isGeneratingCards || !uploadedFile}
+                  disabled={isGeneratingCards || !hasDocuments}
                 >
                   {isGeneratingCards ? "Generating..." : flashcards.length ? "Regenerate" : "Generate Cards"}
                 </button>
@@ -619,7 +716,7 @@ function App() {
             {isGeneratingCards && (
               <div className="tool-loading">
                 <div className="thinking"><span></span><span></span><span></span></div>
-                <p>Creating flashcards from your study material…</p>
+                <p>Creating flashcards from {scopeLabel}…</p>
               </div>
             )}
 

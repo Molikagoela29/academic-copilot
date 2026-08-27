@@ -1,4 +1,5 @@
 import json
+from typing import Optional
 from app.agents.base_agent import BaseAgent
 from app.retrieval import faiss_retriever
 from app.services.qa_service import ask_llm
@@ -7,8 +8,8 @@ from app.utils.llm_parser import extract_json
 MAX_CONTEXT_CHARS = 5000
 
 
-def _build_context(max_chars: int = MAX_CONTEXT_CHARS) -> str:
-    chunks = faiss_retriever.stored_chunks
+def _build_context(doc_id: Optional[str] = None, max_chars: int = MAX_CONTEXT_CHARS) -> str:
+    chunks = faiss_retriever.get_chunks(doc_id=doc_id)
     if not chunks:
         return ""
 
@@ -30,24 +31,26 @@ def _build_context(max_chars: int = MAX_CONTEXT_CHARS) -> str:
 
 class QuizAgent(BaseAgent):
     """
-    Generates open-ended quiz questions from the uploaded document.
+    Generates open-ended quiz questions from the uploaded document(s).
     Each question comes with a rich conceptual answer that explains
-    the surrounding idea so the student truly understands — not just
-    recalls a fact.
+    the surrounding idea so the student truly understands.
     """
 
-    def run(self, num_questions: int = 5) -> dict:
+    def run(self, num_questions: int = 5, doc_id: Optional[str] = None) -> dict:
         """
         Args:
             num_questions: How many questions to generate.
+            doc_id: Optional document ID to scope questions to.
 
         Returns:
             {questions: list[{question: str, answer: str}]}
         """
-        if not faiss_retriever.stored_index:
+        if not faiss_retriever.has_documents():
             return {"questions": []}
 
-        context = _build_context()
+        context = _build_context(doc_id=doc_id)
+        if not context:
+            return {"questions": []}
 
         prompt = f"""
 You are an Academic Copilot creating a quiz to help a student deeply understand their study material.

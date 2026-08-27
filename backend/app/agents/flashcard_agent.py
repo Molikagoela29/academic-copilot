@@ -1,4 +1,5 @@
 import json
+from typing import Optional
 from app.agents.base_agent import BaseAgent
 from app.retrieval import faiss_retriever
 from app.services.qa_service import ask_llm
@@ -7,8 +8,8 @@ from app.utils.llm_parser import extract_json
 MAX_CONTEXT_CHARS = 5000
 
 
-def _build_context(max_chars: int = MAX_CONTEXT_CHARS) -> str:
-    chunks = faiss_retriever.stored_chunks
+def _build_context(doc_id: Optional[str] = None, max_chars: int = MAX_CONTEXT_CHARS) -> str:
+    chunks = faiss_retriever.get_chunks(doc_id=doc_id)
     if not chunks:
         return ""
 
@@ -30,21 +31,24 @@ def _build_context(max_chars: int = MAX_CONTEXT_CHARS) -> str:
 
 class FlashcardAgent(BaseAgent):
     """
-    Generates term/definition flashcard pairs from the uploaded document.
+    Generates term/definition flashcard pairs from the uploaded document(s).
     """
 
-    def run(self, num_cards: int = 10) -> dict:
+    def run(self, num_cards: int = 10, doc_id: Optional[str] = None) -> dict:
         """
         Args:
             num_cards: How many flashcard pairs to generate.
+            doc_id: Optional document ID to scope flashcards to.
 
         Returns:
             {flashcards: list[{term: str, definition: str}]}
         """
-        if not faiss_retriever.stored_index:
+        if not faiss_retriever.has_documents():
             return {"flashcards": []}
 
-        context = _build_context()
+        context = _build_context(doc_id=doc_id)
+        if not context:
+            return {"flashcards": []}
 
         prompt = f"""
 You are an Academic Copilot creating revision flashcards from a student's study material.
