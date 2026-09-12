@@ -1,65 +1,23 @@
-import json
 from typing import Optional
+
 from app.agents.base_agent import BaseAgent
-from app.retrieval import faiss_retriever
-from app.services.qa_service import ask_llm
-from app.utils.llm_parser import extract_json
+from app.core.errors import LLMBadOutput, NoDocumentsIndexed
+from app.services import llm_service
+from app.services.context_builder import build_overview_context
 
 MAX_CONTEXT_CHARS = 5000
 
-
-def _build_context(doc_id: Optional[str] = None, max_chars: int = MAX_CONTEXT_CHARS) -> str:
-    chunks = faiss_retriever.get_chunks(doc_id=doc_id)
-    if not chunks:
-        return ""
-
-    total = len(chunks)
-    step = max(1, total // 80)
-    indices = list(range(0, total, step))
-
-    collected = []
-    char_count = 0
-    for idx in indices:
-        text = chunks[idx]["text"]
-        if char_count + len(text) > max_chars:
-            break
-        collected.append(text)
-        char_count += len(text)
-
-    return "\n\n".join(collected)
-
-
-class FlashcardAgent(BaseAgent):
-    """
-    Generates term/definition flashcard pairs from the uploaded document(s).
-    """
-
-    def run(self, num_cards: int = 10, doc_id: Optional[str] = None) -> dict:
-        """
-        Args:
-            num_cards: How many flashcard pairs to generate.
-            doc_id: Optional document ID to scope flashcards to.
-
-        Returns:
-            {flashcards: list[{term: str, definition: str}]}
-        """
-        if not faiss_retriever.has_documents():
-            return {"flashcards": []}
-
-        context = _build_context(doc_id=doc_id)
-        if not context:
-            return {"flashcards": []}
-
-        prompt = f"""
+PROMPT_TEMPLATE = """
 You are an Academic Copilot creating revision flashcards from a student's study material.
 
 Generate exactly {num_cards} flashcard pairs based on the study material below.
 
 Rules:
-- Each flashcard should have a concise TERM and a clear, complete DEFINITION.
-- Terms can be: concepts, processes, principles, formulas, or important names.
-- Definitions should be plain, student-friendly, and explain the term clearly in 1-3 sentences.
+- Each flashcard has a concise TERM and a clear, complete DEFINITION.
+- Terms can be concepts, processes, principles, formulas, or important names.
+- Definitions should be plain, student-friendly, and explain the term in 1-3 sentences.
 - Cover a wide variety of topics from across the material.
+- Do not repeat the same term twice.
 
 Respond ONLY with a valid JSON array. No extra text before or after. Format:
 [
@@ -75,13 +33,42 @@ Study Material:
 JSON:
 """
 
-        raw = ask_llm(prompt).strip()
 
-        try:
-            flashcards = extract_json(raw)
-            if not isinstance(flashcards, list):
-                flashcards = []
-        except (ValueError, json.JSONDecodeError):
-            flashcards = []
+class FlashcardAgent(BaseAgent):
+    """Generates term/definition flashcard pairs from the uploaded document(s)."""
+
+    def run(self, num_cards: int = 10, doc_id: Optional[str] = None) -> dict:
+        """Returns {flashcards: list[{term, definition}]}."""
+        context = build_overview_context(doc_id=doc_id, max_chars=MAX_CONTEXT_CHARS)
+        if not context:
+            raise NoDocumentsIndexed(
+                "No readable content was found for the selected document."
+            )
+
+        prompt = PROMPT_TEMPLATE.format(num_cards=num_cards, context=context)
+        parsed = llm_service.ask_llm_json(prompt)
+
+        if not isinstance(parsed, list):
+            raise LLMBadOutput("The model did not return a list of flashcards.")
+
+        flashcards = []
+        seen_terms = set()
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            term = item.get("term")
+            definition = item.get("definition")
+            if not isinstance(term, str) or not isinstance(definition, str):
+                continue
+            term, definition = term.strip(), definition.strip()
+            if not term or not definition or term.lower() in seen_terms:
+                continue
+            seen_terms.add(term.lower())
+            flashcards.append({"term": term, "definition": definition})
+
+        if not flashcards:
+            raise LLMBadOutput(
+                "The model did not produce any usable flashcards. Please try again."
+            )
 
         return {"flashcards": flashcards}

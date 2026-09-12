@@ -1,29 +1,54 @@
+"""
+In-memory FAISS index registry with durable on-disk persistence.
+
+Each document owns a cosine-similarity index (IndexFlatIP over L2-normalised
+vectors). Metadata lives in SQLite; the vectors and chunk text live on disk
+under `data/storage/<doc_id>/`.
+"""
+
 import json
+import logging
+import os
 import shutil
-from datetime import datetime
+import threading
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Any, Dict, List, Optional
+
 import faiss
+
+from app.core.config import settings
+from app.core.errors import DocumentNotFound
 from app.embeddings import embedder
 
-STORAGE_DIR = Path("storage")
-STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+logger = logging.getLogger(__name__)
 
-# Document registry: doc_id -> { "doc_id": str, "filename": str, "pages": int, "upload_time": str, "chunks": list[dict], "index": faiss.IndexFlatIP }
-registry: Dict[str, Dict[str, Any]] = {}
+# doc_id -> {"doc_id", "filename", "chunks": list[dict], "index": faiss.Index}
+_registry: Dict[str, Dict[str, Any]] = {}
 
+# Guards _registry and the FAISS indexes it holds. FAISS indexes are not safe
+# for concurrent mutation, and FastAPI runs sync endpoints in a threadpool.
+_lock = threading.RLock()
+
+
+def _doc_dir(doc_id: str) -> Path:
+    return settings.storage_dir / doc_id
+
+
+def _atomic_write(path: Path, write_fn) -> None:
+    """Write via a temporary file + rename so a crash cannot corrupt the target."""
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    write_fn(tmp_path)
+    os.replace(tmp_path, path)
+
+
+# ─── Building & persistence ───────────────────────────────────────────────────
 
 def build_and_register_index(
     doc_id: str,
     filename: str,
-    pages: int,
     chunks: List[dict],
-) -> faiss.IndexFlatIP:
-    """
-    Build a cosine similarity FAISS index (IndexFlatIP with L2 normalized vectors)
-    for the given chunks, and register it under doc_id.
-    """
-    # Ensure each chunk includes doc_id
+) -> int:
+    """Embed the chunks, build a cosine index, register it and persist to disk."""
     for chunk in chunks:
         chunk["doc_id"] = doc_id
         chunk["filename"] = filename
@@ -31,193 +56,188 @@ def build_and_register_index(
     texts = [chunk["text"] for chunk in chunks]
     embeddings = embedder.encode(texts, normalize=True)
 
-    dimension = embeddings.shape[1]
-    index = faiss.IndexFlatIP(dimension)
+    index = faiss.IndexFlatIP(embeddings.shape[1])
     index.add(embeddings)
 
-    registry[doc_id] = {
-        "doc_id": doc_id,
-        "filename": filename,
-        "pages": pages,
-        "upload_time": datetime.utcnow().isoformat(),
-        "chunks": chunks,
-        "index": index,
-    }
+    with _lock:
+        _registry[doc_id] = {
+            "doc_id": doc_id,
+            "filename": filename,
+            "chunks": chunks,
+            "index": index,
+        }
+        _persist(doc_id)
 
-    save_document(doc_id)
-    return index
+    return len(chunks)
 
 
-def save_document(doc_id: str) -> None:
-    """Persist index, chunks, and metadata for a document to disk."""
-    if doc_id not in registry:
+def _persist(doc_id: str) -> None:
+    """Write the index and chunks for a document. Caller must hold the lock."""
+    doc_data = _registry.get(doc_id)
+    if doc_data is None:
         return
 
-    doc_data = registry[doc_id]
-    doc_dir = STORAGE_DIR / doc_id
+    doc_dir = _doc_dir(doc_id)
     doc_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Save FAISS index
-    faiss.write_index(doc_data["index"], str(doc_dir / "index.faiss"))
+    _atomic_write(
+        doc_dir / "index.faiss",
+        lambda tmp: faiss.write_index(doc_data["index"], str(tmp)),
+    )
 
-    # 2. Save chunks
-    with open(doc_dir / "chunks.json", "w", encoding="utf-8") as f:
-        json.dump(doc_data["chunks"], f, ensure_ascii=False, indent=2)
+    def _write_chunks(tmp: Path) -> None:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(doc_data["chunks"], handle, ensure_ascii=False)
 
-    # 3. Save metadata
-    meta = {
-        "doc_id": doc_data["doc_id"],
-        "filename": doc_data["filename"],
-        "pages": doc_data["pages"],
-        "chunks_count": len(doc_data["chunks"]),
-        "upload_time": doc_data["upload_time"],
-    }
-    with open(doc_dir / "meta.json", "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False, indent=2)
+    _atomic_write(doc_dir / "chunks.json", _write_chunks)
 
 
 def load_all() -> int:
-    """
-    Scan storage directory and load all persisted indices and metadata into registry.
-    Returns the number of documents loaded.
-    """
-    if not STORAGE_DIR.exists():
+    """Restore every persisted index into memory. Returns the count loaded."""
+    if not settings.storage_dir.exists():
         return 0
 
-    loaded_count = 0
-    for doc_dir in STORAGE_DIR.iterdir():
-        if not doc_dir.is_dir():
-            continue
+    loaded = 0
+    with _lock:
+        for doc_dir in sorted(settings.storage_dir.iterdir()):
+            if not doc_dir.is_dir():
+                continue
 
-        index_file = doc_dir / "index.faiss"
-        chunks_file = doc_dir / "chunks.json"
-        meta_file = doc_dir / "meta.json"
+            index_file = doc_dir / "index.faiss"
+            chunks_file = doc_dir / "chunks.json"
+            if not (index_file.exists() and chunks_file.exists()):
+                logger.warning("Removing incomplete document directory %s", doc_dir.name)
+                shutil.rmtree(doc_dir, ignore_errors=True)
+                continue
 
-        if index_file.exists() and chunks_file.exists() and meta_file.exists():
             try:
-                with open(meta_file, "r", encoding="utf-8") as f:
-                    meta = json.load(f)
-
-                with open(chunks_file, "r", encoding="utf-8") as f:
-                    chunks = json.load(f)
-
+                with open(chunks_file, "r", encoding="utf-8") as handle:
+                    chunks = json.load(handle)
                 index = faiss.read_index(str(index_file))
+            except Exception as exc:  # noqa: BLE001 - one bad doc must not block startup
+                logger.error("Could not load document %s: %s", doc_dir.name, exc)
+                continue
 
-                doc_id = meta["doc_id"]
-                registry[doc_id] = {
-                    "doc_id": doc_id,
-                    "filename": meta["filename"],
-                    "pages": meta.get("pages", 1),
-                    "upload_time": meta.get("upload_time", datetime.utcnow().isoformat()),
-                    "chunks": chunks,
-                    "index": index,
-                }
-                loaded_count += 1
-            except Exception as e:
-                print(f"⚠️ Error loading document from {doc_dir}: {e}")
+            doc_id = doc_dir.name
+            _registry[doc_id] = {
+                "doc_id": doc_id,
+                "filename": chunks[0]["filename"] if chunks else doc_id,
+                "chunks": chunks,
+                "index": index,
+            }
+            loaded += 1
 
-    print(f"📦 Loaded {loaded_count} document(s) from persistent storage.")
-    return loaded_count
+    logger.info("Loaded %s document index(es) from disk", loaded)
+    return loaded
 
 
-def delete_document(doc_id: str) -> bool:
-    """Delete a document from in-memory registry and disk storage."""
-    deleted = False
-    if doc_id in registry:
-        del registry[doc_id]
-        deleted = True
+def drop_document(doc_id: str) -> bool:
+    """Remove a document from memory and delete its on-disk index."""
+    with _lock:
+        existed = _registry.pop(doc_id, None) is not None
 
-    doc_dir = STORAGE_DIR / doc_id
+    doc_dir = _doc_dir(doc_id)
     if doc_dir.exists():
         shutil.rmtree(doc_dir, ignore_errors=True)
-        deleted = True
+        existed = True
 
-    return deleted
+    return existed
 
 
-def list_documents() -> List[Dict[str, Any]]:
-    """List all loaded documents with metadata."""
-    docs = []
-    for doc_id, data in registry.items():
-        docs.append({
-            "doc_id": doc_id,
-            "filename": data["filename"],
-            "pages": data["pages"],
-            "chunks_count": len(data["chunks"]),
-            "upload_time": data["upload_time"],
-        })
-    return docs
+# ─── Queries ──────────────────────────────────────────────────────────────────
+
+def is_indexed(doc_id: str) -> bool:
+    with _lock:
+        return doc_id in _registry
 
 
 def has_documents() -> bool:
-    """Check if any documents are currently loaded."""
-    return len(registry) > 0
+    with _lock:
+        return bool(_registry)
+
+
+def indexed_ids() -> List[str]:
+    with _lock:
+        return list(_registry)
+
+
+def chunk_count(doc_id: str) -> int:
+    with _lock:
+        doc = _registry.get(doc_id)
+        return len(doc["chunks"]) if doc else 0
 
 
 def get_chunks(doc_id: Optional[str] = None) -> List[dict]:
     """
-    Get all chunks for a specific doc_id, or for all documents if doc_id is None.
-    """
-    if doc_id:
-        doc = registry.get(doc_id)
-        return doc["chunks"] if doc else []
+    All chunks for one document, or for every document when doc_id is None.
 
-    all_chunks = []
-    for doc in registry.values():
-        all_chunks.extend(doc["chunks"])
-    return all_chunks
+    Raises DocumentNotFound if a specific doc_id was requested but is unknown,
+    so a stale selection surfaces as a 404 instead of silently widening scope.
+    """
+    with _lock:
+        if doc_id is not None:
+            doc = _registry.get(doc_id)
+            if doc is None:
+                raise DocumentNotFound(f"Document '{doc_id}' is not indexed.")
+            return list(doc["chunks"])
+
+        all_chunks: List[dict] = []
+        for doc in _registry.values():
+            all_chunks.extend(doc["chunks"])
+        return all_chunks
 
 
 def retrieve(
     question: str,
     doc_id: Optional[str] = None,
-    k: int = 3,
-    min_similarity: float = 0.35,
+    k: Optional[int] = None,
+    min_similarity: Optional[float] = None,
 ) -> List[dict]:
     """
-    Retrieve the top-k most relevant chunks using cosine similarity.
-    If doc_id is provided, searches only that document.
-    If doc_id is None, searches across all indexed documents and re-ranks top results.
+    Return the top-k most relevant chunks by cosine similarity.
+
+    With a doc_id, only that document is searched; without one, results from
+    every document are merged and re-ranked on a common similarity scale.
     """
-    if not registry:
-        return []
+    k = k or settings.retrieval_k
+    threshold = settings.min_similarity if min_similarity is None else min_similarity
 
-    target_docs = [registry[doc_id]] if doc_id and doc_id in registry else list(registry.values())
-    if not target_docs:
-        return []
+    with _lock:
+        if doc_id is not None:
+            if doc_id not in _registry:
+                raise DocumentNotFound(f"Document '{doc_id}' is not indexed.")
+            targets = [_registry[doc_id]]
+        else:
+            targets = list(_registry.values())
 
-    query_embedding = embedder.encode([question], normalize=True)
+        if not targets:
+            return []
 
-    candidates = []
+        query_embedding = embedder.encode([question], normalize=True)
 
-    for doc in target_docs:
-        index = doc["index"]
-        chunks = doc["chunks"]
-        
-        # Search index
-        num_search = min(k * 2, len(chunks))
-        if num_search <= 0:
-            continue
+        candidates: List[tuple[float, dict]] = []
+        for doc in targets:
+            chunks = doc["chunks"]
+            num_search = min(k * 2, len(chunks))
+            if num_search <= 0:
+                continue
 
-        similarities, indices = index.search(query_embedding, num_search)
+            similarities, indices = doc["index"].search(query_embedding, num_search)
+            for similarity, idx in zip(similarities[0], indices[0]):
+                if 0 <= idx < len(chunks) and similarity >= threshold:
+                    candidates.append((float(similarity), chunks[idx]))
 
-        for sim, idx in zip(similarities[0], indices[0]):
-            if 0 <= idx < len(chunks) and sim >= min_similarity:
-                candidates.append((float(sim), chunks[idx]))
-
-    # Sort all candidates across documents by cosine similarity descending
     candidates.sort(key=lambda item: item[0], reverse=True)
 
-    # Return top k chunk dicts
-    return [chunk for _, chunk in candidates[:k]]
+    results = []
+    for similarity, chunk in candidates[:k]:
+        enriched = dict(chunk)
+        enriched["score"] = round(similarity, 4)
+        results.append(enriched)
+    return results
 
 
-# ─── Backward compatibility helpers ──────────────────────────────────────────
-
-@property
-def stored_chunks():
-    return get_chunks()
-
-@property
-def stored_index():
-    return [doc["index"] for doc in registry.values()]
+def reset() -> None:
+    """Clear the in-memory registry. Used by the test suite."""
+    with _lock:
+        _registry.clear()

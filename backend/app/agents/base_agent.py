@@ -5,8 +5,8 @@ class BaseAgent(ABC):
     """
     Abstract base for all Academic Copilot agents.
 
-    Subclasses implement `run()` with whatever keyword arguments
-    their specific task requires.
+    Subclasses implement `run()` with whatever keyword arguments their specific
+    task requires and return a structured result dict.
     """
 
     @abstractmethod

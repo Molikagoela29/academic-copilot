@@ -1,16 +1,52 @@
-# React + Vite
+# Academic Copilot — Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+React 19 + Vite client for the Academic Copilot API. See the
+[project README](../README.md) for the full picture.
 
-Currently, two official plugins are available:
+## Setup
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+```bash
+npm install
+cp .env.example .env   # optional; defaults to http://127.0.0.1:8000
+npm run dev
+```
 
-## React Compiler
+| Script | Purpose |
+| --- | --- |
+| `npm run dev` | Dev server with hot reload |
+| `npm run build` | Production build into `dist/` |
+| `npm run preview` | Serve the production build locally |
+| `npm run lint` | Lint `src/` with oxlint |
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Configuration
 
-## Expanding the Oxlint configuration
+`VITE_API_URL` points the client at the backend. It is read at build time, so a
+production image must be built with the value it will use (the Dockerfile takes it as a
+build arg).
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+## Structure
+
+```
+src/
+  api.js                 Single API client — fetch wrapper, error mapping, SSE parsing
+  App.jsx                Shell: layout, tabs, document scope
+  hooks/useDocuments.js  Document library; polls while ingestion is in progress
+  components/
+    Sidebar.jsx          Upload, library, indexing status, model health
+    ChatPanel.jsx        Streaming chat, history drawer, citation chips
+    SummaryPanel.jsx     Streaming summaries + saved summaries
+    QuizPanel.jsx        Quiz generation, written answers, AI grading
+    FlashcardPanel.jsx   Deck generation and browsing
+    ReviewPanel.jsx      SM-2 spaced-repetition session
+    PdfViewer.jsx        Modal opening a cited page of the source PDF
+    Markdown.jsx         Markdown rendering for all model output
+    Spinner.jsx          Loading, empty and error primitives
+```
+
+## Notes
+
+Model output is rendered as Markdown (`react-markdown` + `remark-gfm`) — the models emit
+headings, lists and tables, which showed as raw syntax when rendered as plain text.
+
+Chat and summary generation stream over server-sent events; every request is cancellable
+via `AbortController`, and switching away mid-generation aborts it.

@@ -1,10 +1,30 @@
+# Python
 venv/
+.venv/
 __pycache__/
 *.pyc
-.env
-.vscode/
-uploads/
-data/
+.pytest_cache/
+.coverage
+htmlcov/
 
+# Environment
+.env
+.env.local
+
+# Application data — uploads, FAISS indices and the SQLite database
+backend/data/
+
+# Legacy data directories from earlier versions
+backend/uploads/
+backend/storage/
+uploads/
+storage/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Frontend
 frontend/node_modules/
 frontend/dist/

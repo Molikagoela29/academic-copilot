@@ -1,63 +1,23 @@
-from typing import Optional
+from typing import Iterator, Optional
+
 from app.agents.base_agent import BaseAgent
-from app.retrieval import faiss_retriever
-from app.services.qa_service import ask_llm
+from app.core.errors import NoDocumentsIndexed
+from app.services import llm_service
+from app.services.context_builder import build_overview_context
 
 MAX_CONTEXT_CHARS = 6000
 
-
-def _build_context(doc_id: Optional[str] = None, max_chars: int = MAX_CONTEXT_CHARS) -> str:
-    """
-    Sample chunks evenly from the selected document (or all documents) up to max_chars.
-    """
-    chunks = faiss_retriever.get_chunks(doc_id=doc_id)
-    if not chunks:
-        return ""
-
-    total = len(chunks)
-    step = max(1, total // 100)
-    indices = list(range(0, total, step))
-
-    collected = []
-    char_count = 0
-
-    for idx in indices:
-        text = chunks[idx]["text"]
-        if char_count + len(text) > max_chars:
-            break
-        collected.append(text)
-        char_count += len(text)
-
-    return "\n\n".join(collected)
-
-
-class SummaryAgent(BaseAgent):
-    """
-    Summarizes the uploaded study material using all available chunks.
-    """
-
-    def run(self, doc_id: Optional[str] = None, **kwargs) -> dict:
-        """
-        Returns:
-            {summary: str}
-        """
-        if not faiss_retriever.has_documents():
-            return {"summary": "No document uploaded."}
-
-        context = _build_context(doc_id=doc_id)
-
-        if not context:
-            return {"summary": "No readable content found for the selected document."}
-
-        prompt = f"""
+PROMPT_TEMPLATE = """
 You are an Academic Copilot. A student has uploaded their study material and wants a clear, structured summary.
 
 Write a comprehensive summary of the study material below. Your summary should:
 - Cover all major topics and concepts
-- Be organized with clear sections or paragraphs per topic
+- Be organised under clear Markdown headings, one per topic
 - Use plain, student-friendly language
-- Highlight key definitions, principles, or formulas if present
-- Be detailed enough that a student can use it for revision
+- Highlight key definitions, principles, or formulas in **bold**
+- Be detailed enough that a student can revise from it alone
+
+Format your answer in Markdown.
 
 Study Material:
 {context}
@@ -65,5 +25,22 @@ Study Material:
 Summary:
 """
 
-        summary = ask_llm(prompt).strip()
-        return {"summary": summary}
+
+class SummaryAgent(BaseAgent):
+    """Summarises the uploaded study material."""
+
+    def _prompt(self, doc_id: Optional[str]) -> str:
+        context = build_overview_context(doc_id=doc_id, max_chars=MAX_CONTEXT_CHARS)
+        if not context:
+            raise NoDocumentsIndexed(
+                "No readable content was found for the selected document."
+            )
+        return PROMPT_TEMPLATE.format(context=context)
+
+    def run(self, doc_id: Optional[str] = None, **kwargs) -> dict:
+        """Returns {summary: str}."""
+        return {"summary": llm_service.ask_llm(self._prompt(doc_id)).strip()}
+
+    def stream(self, doc_id: Optional[str] = None) -> Iterator[str]:
+        """Yield the summary token by token."""
+        return llm_service.stream_llm(self._prompt(doc_id))

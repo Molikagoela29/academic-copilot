@@ -1,57 +1,59 @@
-import uuid
-import aiofiles
-from pathlib import Path
+import logging
 
-from fastapi import APIRouter, UploadFile, File
+from fastapi import APIRouter, BackgroundTasks, File, UploadFile
 
-from app.parsers import pdf_parser
-from app.retrieval import faiss_retriever
+from app.db import repository
 from app.models.schemas import UploadResponse
+from app.services import ingestion_service
 
-router = APIRouter()
+logger = logging.getLogger(__name__)
+
+router = APIRouter(tags=["upload"])
 
 
-@router.post("/upload", response_model=UploadResponse)
-async def upload_file(file: UploadFile = File(...)):
+@router.post("/upload", response_model=UploadResponse, status_code=202)
+async def upload_file(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+) -> UploadResponse:
+    """
+    Accept a PDF and queue it for indexing.
 
-    # 1. Validate file type
-    if not file.filename.lower().endswith(".pdf"):
-        return {"error": "Only PDF files are supported"}
+    Returns immediately with status "processing"; poll `GET /documents` for the
+    document to become "ready". Parsing and embedding a large PDF takes far
+    longer than a request should block for.
+    """
+    file_path, doc_id, file_hash = await ingestion_service.save_upload(file)
+    filename = file.filename or "document.pdf"
 
-    # 2. Save file
-    upload_dir = Path("uploads")
-    upload_dir.mkdir(exist_ok=True)
+    existing = repository.get_document_by_hash(file_hash)
+    if existing and existing["status"] != "failed":
+        file_path.unlink(missing_ok=True)
+        return UploadResponse(
+            doc_id=existing["doc_id"],
+            filename=existing["filename"],
+            status=existing["status"],
+            duplicate=True,
+            message=f"'{existing['filename']}' is already in your library.",
+        )
 
-    doc_id = str(uuid.uuid4())
-    unique_filename = f"{doc_id}_{file.filename}"
-    file_path = upload_dir / unique_filename
+    if existing:
+        # A previous attempt at this same file failed; clear it and retry.
+        ingestion_service.remove_document(existing["doc_id"])
 
-    async with aiofiles.open(file_path, "wb") as out_file:
-        content = await file.read()
-        await out_file.write(content)
-
-    # 3. Parse and chunk
-    chunks = pdf_parser.extract_chunks(file_path, file.filename)
-
-    if not chunks:
-        return {"error": "No readable text found in PDF"}
-
-    total_pages = pdf_parser.page_count(file_path)
-
-    # 4. Build cosine FAISS index and register (persists automatically)
-    faiss_retriever.build_and_register_index(
+    repository.create_document(
         doc_id=doc_id,
-        filename=file.filename,
-        pages=total_pages,
-        chunks=chunks,
+        filename=filename,
+        stored_filename=file_path.name,
+        file_hash=file_hash,
     )
 
-    print(f"✅ Processed and persisted {len(chunks)} chunks for {file.filename} (doc_id={doc_id})")
+    background_tasks.add_task(ingestion_service.ingest, doc_id, file_path, filename)
 
     return UploadResponse(
         doc_id=doc_id,
-        filename=file.filename,
-        pages_processed=total_pages,
-        chunks_created=len(chunks),
-        message="File processed and indexed successfully 🚀",
+        filename=filename,
+        status="processing",
+        message="Upload received. Indexing has started.",
     )
+

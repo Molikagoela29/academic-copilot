@@ -1,33 +1,58 @@
-import numpy as np
+import logging
+import threading
+from typing import Any, List, Optional
+
 import faiss
-from sentence_transformers import SentenceTransformer
+import numpy as np
 
-BATCH_SIZE = 64
+from app.core.config import settings
 
-# Load once, shared across upload and query
-_model = SentenceTransformer("all-MiniLM-L6-v2")
+logger = logging.getLogger(__name__)
+
+_model: Optional[Any] = None
+_model_lock = threading.Lock()
 
 
-def encode(
-    texts: list[str],
-    batch_size: int = BATCH_SIZE,
-    normalize: bool = True,
-) -> np.ndarray:
+def get_model() -> Any:
     """
-    Encode a list of strings into float32 embeddings with batching and optional L2 normalization.
-    
-    L2 normalization ensures inner product (IP) is equivalent to cosine similarity.
+    Load the sentence-transformer on first use rather than at import time.
+
+    Importing sentence_transformers pulls in the whole torch stack and a
+    first run downloads model weights; neither belongs in application startup
+    or in a test run that never embeds anything.
+    """
+    global _model
+    if _model is None:
+        with _model_lock:
+            if _model is None:
+                from sentence_transformers import SentenceTransformer
+
+                logger.info("Loading embedding model '%s'…", settings.embedding_model)
+                _model = SentenceTransformer(settings.embedding_model)
+                logger.info("Embedding model ready")
+    return _model
+
+
+def dimension() -> int:
+    return get_model().get_sentence_embedding_dimension()
+
+
+def encode(texts: List[str], normalize: bool = True) -> np.ndarray:
+    """
+    Encode strings into float32 embeddings.
+
+    L2 normalisation makes inner product equivalent to cosine similarity, which
+    is what the IndexFlatIP indexes in the retriever rely on.
     """
     if not texts:
-        return np.empty((0, _model.get_sentence_embedding_dimension()), dtype="float32")
+        return np.empty((0, dimension()), dtype="float32")
 
-    all_embeddings = []
-    for i in range(0, len(texts), batch_size):
-        batch = texts[i : i + batch_size]
-        batch_embeddings = _model.encode(batch, show_progress_bar=False)
-        all_embeddings.append(batch_embeddings)
-
-    embeddings = np.vstack(all_embeddings).astype("float32")
+    embeddings = get_model().encode(
+        texts,
+        batch_size=settings.embedding_batch_size,
+        show_progress_bar=False,
+        convert_to_numpy=True,
+    ).astype("float32")
 
     if normalize:
         faiss.normalize_L2(embeddings)
